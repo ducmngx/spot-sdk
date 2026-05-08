@@ -1,0 +1,22 @@
+# Example config for graphnav_viz. Copy to graphnav_viz.yaml at the repo root
+# (or anywhere you launch the server from) and edit. CLI flags override these
+# values when given.
+
+# Parent directory the server scans for graphs. Walks up to 2 levels deep;
+# any directory containing a `graph` proto file is treated as a graph.
+# Set to null to disable scanning and rely solely on `graphs:` below.
+graphs_root: recorded_graphs
+
+# Optional: register graphs by friendly name with explicit paths.
+# Useful for graphs outside `graphs_root` (e.g. a network share) or to give
+# a clean URL slug to a deeply-nested graph. Explicit entries override
+# discovered ones on name collision.
+graphs:
+  # - name: warehouse
+  #   path: /mnt/share/spot_maps/warehouse_v2
+  # - name: lab
+  #   path: ~/spot/lab_graph
+
+server:
+  host: 127.0.0.1
+  port: 8000

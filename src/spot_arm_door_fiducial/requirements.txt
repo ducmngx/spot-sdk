@@ -1,0 +1,4 @@
+bosdyn-client>=5.1.4
+bosdyn-mission>=5.1.4
+numpy
+pyyaml

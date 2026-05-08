@@ -1,0 +1,15 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build_cruft/
+prebuilt/*.whl
+
+# Local runtime data — graphs are large binary protos, configs are per-machine.
+recorded_graphs/
+graphnav_viz.yaml
+doors.yaml
+# Annotations sidecars produced by graphnav_viz (also live inside recorded_graphs/).
+annotations.json

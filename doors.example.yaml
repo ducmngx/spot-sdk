@@ -1,0 +1,43 @@
+# Doors config for spot_arm_door_fiducial.
+#
+# Each entry pairs a fiducial tag id with the parameters needed to open the
+# door behind it. Fiducial conventions (see src/spot_arm_door_fiducial/geometry.py):
+#   - tag mounted flat on door face, +X out of the door, +Z up the door.
+#   - tag_to_handle is the offset (meters) from tag origin to handle, in tag frame.
+#     A tag mounted directly below the handle ⇒ tag_to_handle: [0, 0, 0.12]
+#       (12 cm above the tag along the door face).
+#
+# handle_type: lever | push_bar
+# swing:       push  | pull        (direction the door moves when opened)
+# hinge:       left  | right       (looking at the door from the robot's side)
+# nav_waypoint: optional — name or id of a graph_nav waypoint near this door.
+#               Omit if you don't want the script to navigate before opening.
+# approach_standoff_m: distance (m) the robot stands from the handle before
+#                      issuing OpenDoor. 1.0 m is a sane default.
+
+doors:
+  - name: lab_door
+    tag_id: 23
+    tag_to_handle: [0.0, 0.0, 0.12]
+    handle_type: lever
+    swing: pull
+    hinge: right
+    nav_waypoint: lab-entrance
+    approach_standoff_m: 1.0
+
+  - name: kitchen_pushbar
+    tag_id: 47
+    tag_to_handle: [0.0, 0.0, 0.20]
+    handle_type: push_bar
+    swing: push
+    hinge: left
+    nav_waypoint: kitchen-approach
+    approach_standoff_m: 1.2
+
+  - name: office_lever_no_nav
+    tag_id: 11
+    tag_to_handle: [0.0, 0.05, 0.10]   # tag offset slightly to one side of handle
+    handle_type: lever
+    swing: pull
+    hinge: left
+    # nav_waypoint omitted: drive there manually (or via tablet) before running.

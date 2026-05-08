@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>GraphNav Annotation App</title>
+<link rel="stylesheet" href="style.css" />
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+  <header>
+    <label>Graph
+      <select id="graph-select"></select>
+    </label>
+    <span id="graph-info"></span>
+    <button id="view-toggle">Switch to 3D</button>
+    <button id="scans-toggle">Show scans</button>
+    <button id="save-btn">Save annotations</button>
+    <button id="export-doors-btn">Export doors.yaml</button>
+    <span id="status"></span>
+  </header>
+
+  <main>
+    <div id="map">
+      <canvas id="canvas2d"></canvas>
+      <div id="canvas3d" style="display:none"></div>
+    </div>
+
+    <aside id="sidebar">
+      <nav id="tabs">
+        <button class="tab active" data-tab="waypoint">Waypoint</button>
+        <button class="tab" data-tab="doors">Doors</button>
+        <button class="tab" data-tab="rooms">Rooms</button>
+        <button class="tab" data-tab="nogo">No-go</button>
+      </nav>
+      <section id="panel-waypoint" class="panel active">
+        <h2>Waypoint</h2>
+        <div id="wp-empty" class="muted">Click a waypoint on the map.</div>
+        <form id="wp-form" hidden>
+          <label>ID <input id="wp-id" readonly /></label>
+          <label>Name <input id="wp-name" /></label>
+          <label>Tags (comma-separated) <input id="wp-tags" /></label>
+          <label>Notes <textarea id="wp-notes" rows="3"></textarea></label>
+          <button type="button" id="wp-apply">Apply</button>
+        </form>
+      </section>
+      <section id="panel-doors" class="panel">
+        <h2>Doors</h2>
+        <div id="doors-list"></div>
+      </section>
+      <section id="panel-rooms" class="panel">
+        <h2>Rooms</h2>
+        <button id="room-new">+ New room</button>
+        <div id="rooms-list"></div>
+      </section>
+      <section id="panel-nogo" class="panel">
+        <h2>No-go zones</h2>
+        <button id="nogo-new">+ New no-go zone</button>
+        <div id="nogo-list"></div>
+      </section>
+    </aside>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
