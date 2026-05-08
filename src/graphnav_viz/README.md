@@ -155,7 +155,11 @@ See `loader.fiducial_category` for the source of truth.
 | GET | `/api/robot_state` | `{powered_on, estopped, estop_endpoints}`. |
 | GET | `/api/nav_status` | Current `{state, destination, error?}` from the background nav worker. |
 | POST | `/api/power_on` | Powers on the robot's motors. |
-| POST | `/api/stop` | Cancels the active nav and sends a `RobotCommandBuilder.stop_command()`. |
+| POST | `/api/stop` | Cancels the active nav and sends a `RobotCommandBuilder.stop_command()` (does not estop). |
+| GET | `/api/estop/state` | `{level: 'allowed' \| 'settling' \| 'cut' \| 'unknown', endpoint_registered, any_other_estopped}`. |
+| POST | `/api/estop/allow` | Re-arm motion (clear the software estop). |
+| POST | `/api/estop/settle` | Settle-then-cut: robot sits gracefully, then motors cut. |
+| POST | `/api/estop/cut` | Immediate motor power cut. |
 | POST | `/api/graphs/{name}/upload` | Streams `graph` + missing waypoint/edge snapshots to the robot. |
 | POST | `/api/graphs/{name}/localize` | `set_localization` with `FIDUCIAL_INIT_NEAREST`. |
 | POST | `/api/graphs/{name}/navigate/{waypoint_id}` | Starts (or replaces) a background worker that drives Spot to the waypoint. |
@@ -198,9 +202,15 @@ What happens on startup:
    `BOSDYN_CLIENT_USERNAME` / `BOSDYN_CLIENT_PASSWORD`). You don't need to
    `source .env` first.
 2. The SDK authenticates and waits for time-sync.
-3. The server **forcibly takes the body lease** (the tablet will lose body
+3. The server **registers a software e-stop endpoint** (`graphnav_viz`) via
+   `EstopEndpoint.force_simple_setup()`. This displaces any prior endpoint
+   (e.g. the tablet's). `EstopKeepAlive` runs a daemon thread that sends a
+   3 s heartbeat for the rest of the process — if the server crashes or is
+   killed without cleanup, the robot will estop on its own when the
+   heartbeat lapses.
+4. The server **forcibly takes the body lease** (the tablet will lose body
    control) and runs a `LeaseKeepAlive` for the lifetime of the process. The
-   lease returns to the robot when the server exits.
+   lease and estop both return to default on Ctrl-C.
 
 The frontend exposes a header **Live: off / on** toggle and a **Drive**
 sidebar tab. While Live is on, the UI polls `/api/pose` and `/api/nav_status`
@@ -228,15 +238,37 @@ any failure status (`STUCK`, `LOST`, `NO_ROUTE`, `NO_LOCALIZATION`,
 `COMMAND_OVERRIDDEN`), or on `/api/stop`. Status is exposed via
 `/api/nav_status` and shown in the Drive panel.
 
+### Software e-stop
+
+The Drive panel has three estop controls (and the same actions are mirrored
+in a pop-out window via "↗ Pop out e-stop" or by opening `/estop.html`
+directly):
+
+| Button | SDK call | What it does |
+|---|---|---|
+| **Settle-then-cut** (orange) | `EstopKeepAlive.settle_then_cut()` | Robot sits gracefully, then motor power cuts. The recommended "soft stop". |
+| **Hard cut** (red) | `EstopKeepAlive.stop()` | Immediate motor power cut — panic stop. |
+| **Allow / re-arm** (green) | `EstopKeepAlive.allow()` | Clears the estop so motion is permitted again. Disabled when already armed. |
+
+The header shows a live status badge (`● estop: armed` / `settling…` /
+`CUT`). The pop-out window is a single self-contained page that talks to
+the same backend, so the inline panel and the popup stay in sync.
+
 ### Safety notes
 
-- **The server takes the lease forcibly.** If someone else (e.g. the tablet)
-  is driving the robot, they will be preempted. Don't run `--live` in shared
-  operations without coordination.
-- **No e-stop endpoint is registered by this server.** Use the tablet, the
-  hardware kill switch, or run `python python/examples/estop/estop_nogui.py
-  $SPOT_IP` in another terminal. The Drive STOP button only sends a stop
-  command and cancels the nav worker — it does **not** estop.
+- **The server takes the lease and estop endpoint forcibly.** If someone
+  else (e.g. the tablet) is driving the robot, they will be preempted.
+  Don't run `--live` in shared operations without coordination.
+- **The Drive "STOP" button is a stop trajectory, not an e-stop.** It
+  cancels the active nav-worker and sends `RobotCommandBuilder.stop_command()`.
+  Use the orange / red estop buttons for actual estop semantics.
+- **This is not a hardware e-stop.** Spot's physical kill switch and
+  hardware estop on the robot still govern everything; this is the
+  software estop the SDK requires for any motion.
+- Closing the browser tab does **not** estop the robot — the estop is
+  registered server-side and stays armed until the server exits or the
+  operator presses Settle / Cut. If the server process dies, the
+  heartbeat lapses and Spot estops on its own.
 - The robot will only respond to `/navigate` if it's powered on and not
   estopped. Both are surfaced as 409 errors with explicit messages.
 - `/upload` is idempotent — re-uploading the same graph only sends snapshots

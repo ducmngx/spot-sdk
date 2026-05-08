@@ -40,3 +40,12 @@ form button { margin-top: 0.4rem; padding: 0.4rem 0.8rem; background: #2c5282; c
 #panel-drive button.delete { background: #742a2a; padding: 0.6rem 1rem; font-weight: bold; width: 100%; }
 #panel-drive button.delete:hover { background: #9b2c2c; }
 #drive-status { margin-bottom: 0.8rem; line-height: 1.5; }
+.estop-soft { background: #c05621 !important; color: white; padding: 0.6rem 1rem !important; font-weight: bold; }
+.estop-soft:hover { background: #dd6b20 !important; }
+.estop-hard { background: #9b2c2c !important; color: white; padding: 0.6rem 1rem !important; font-weight: bold; }
+.estop-hard:hover { background: #c53030 !important; }
+.estop-allow { background: #2f855a !important; color: white; padding: 0.5rem 1rem !important; }
+.estop-allow:hover { background: #38a169 !important; }
+.estop-allow:disabled { background: #4a5568 !important; cursor: default; }
+#estop-status { font-family: ui-monospace, monospace; font-size: 12px; padding: 0.4rem; border-radius: 3px; background: #1a1d23; }
+#estop-badge { font-family: ui-monospace, monospace; font-size: 12px; }

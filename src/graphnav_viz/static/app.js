@@ -38,6 +38,14 @@ async function init() {
     if (state.live.available) {
       document.getElementById('live-toggle').hidden = false;
       document.getElementById('tab-drive').hidden = false;
+      // Independent of the Live toggle, keep the estop state fresh so the
+      // operator always knows if the robot is armed/cut.
+      setInterval(async () => {
+        try {
+          state.live.estop = await fetch('/api/estop/state').then(r => r.json());
+          updateEstopUI();
+        } catch { /* ignore */ }
+      }, 1000);
     }
   } catch { /* offline-only; ignore */ }
 
@@ -467,7 +475,11 @@ async function pollPose() {
   try {
     state.live.navStatus = await fetch('/api/nav_status').then(r => r.json());
   } catch { /* ignore */ }
+  try {
+    state.live.estop = await fetch('/api/estop/state').then(r => r.json());
+  } catch { state.live.estop = null; }
   updateDriveStatusUI();
+  updateEstopUI();
   state.map2d?.draw();
   state.map3d?.setLivePose?.(state.live.pose);
   // Update header badge
@@ -539,6 +551,59 @@ document.getElementById('drive-localize').addEventListener('click', async () => 
 document.getElementById('drive-stop').addEventListener('click', async () => {
   const r = await fetch('/api/stop', { method: 'POST' });
   setStatus(r.ok ? 'STOP sent' : 'STOP failed');
+});
+
+// --- Software e-stop ---
+
+const ESTOP_BADGE = {
+  allowed:  { text: '● estop: armed',     color: '#48bb78' },
+  settling: { text: '● estop: settling…', color: '#f6ad55' },
+  cut:      { text: '● estop: CUT',       color: '#fc8181' },
+  unknown:  { text: '● estop: unknown',   color: '#a0aec0' },
+};
+
+function updateEstopUI() {
+  const badge = document.getElementById('estop-badge');
+  const statusEl = document.getElementById('estop-status');
+  const allowBtn = document.getElementById('estop-allow');
+  const e = state.live.estop;
+  if (!state.live.available || !e) {
+    badge.hidden = true;
+    statusEl.textContent = '—';
+    allowBtn.disabled = true;
+    return;
+  }
+  badge.hidden = false;
+  const meta = ESTOP_BADGE[e.level] || ESTOP_BADGE.unknown;
+  badge.textContent = meta.text;
+  badge.style.color = meta.color;
+  const otherNote = e.any_other_estopped ? ' (another endpoint also estopped)' : '';
+  statusEl.innerHTML = `Endpoint: ${e.endpoint_registered ? 'registered' : 'NOT registered'}<br>Level: <b style="color:${meta.color}">${e.level}</b>${otherNote}`;
+  // Enable Allow only if currently estopped from our endpoint.
+  allowBtn.disabled = !(e.endpoint_registered && e.level !== 'allowed');
+}
+
+async function estopPost(path, label) {
+  if (!confirm(`${label}? This will stop the robot.`)) return;
+  const r = await fetch(path, { method: 'POST' });
+  const j = await r.json().catch(() => ({}));
+  setStatus(r.ok ? `${label} sent` : `${label} failed: ${j.detail || r.status}`);
+  pollPose();
+}
+
+document.getElementById('estop-settle').addEventListener('click',
+  () => estopPost('/api/estop/settle', 'Settle-then-cut'));
+document.getElementById('estop-cut').addEventListener('click',
+  () => estopPost('/api/estop/cut', 'Hard cut'));
+document.getElementById('estop-allow').addEventListener('click', async () => {
+  const r = await fetch('/api/estop/allow', { method: 'POST' });
+  setStatus(r.ok ? 'E-stop re-armed' : 'Allow failed');
+  pollPose();
+});
+document.getElementById('estop-popout').addEventListener('click', e => {
+  e.preventDefault();
+  window.open('/estop.html', 'graphnav_viz_estop',
+    'width=340,height=320,popup=yes');
 });
 
 init().catch(err => {

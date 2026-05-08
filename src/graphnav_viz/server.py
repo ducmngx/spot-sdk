@@ -30,9 +30,11 @@ class RobotSession:
     def __init__(self, hostname: str):
         # Lazy imports: the offline path must work even if bosdyn-client is
         # somehow broken / not on PYTHONPATH.
+        from bosdyn.client.estop import EstopClient, EstopEndpoint, EstopKeepAlive
         from bosdyn.client.graph_nav import GraphNavClient
         from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
         from bosdyn.client.robot_command import RobotCommandClient
+        from bosdyn.client.robot_state import RobotStateClient
         from utils import utils
 
         self.hostname = hostname
@@ -40,6 +42,18 @@ class RobotSession:
         self.graph_nav = self.robot.ensure_client(GraphNavClient.default_service_name)
         self.lease_client = self.robot.ensure_client(LeaseClient.default_service_name)
         self.command_client = self.robot.ensure_client(RobotCommandClient.default_service_name)
+        self.state_client = self.robot.ensure_client(RobotStateClient.default_service_name)
+        # Register a software estop endpoint BEFORE taking the lease. Without
+        # an active endpoint the robot reports as estopped and refuses motion.
+        # force_simple_setup() displaces any existing endpoint (e.g. the
+        # tablet's), matching the lease take that follows.
+        self.estop_endpoint_name = 'graphnav_viz'
+        self._estop_client = self.robot.ensure_client(EstopClient.default_service_name)
+        self._estop_endpoint = EstopEndpoint(
+            self._estop_client, name=self.estop_endpoint_name, estop_timeout=9.0)
+        self._estop_endpoint.force_simple_setup()
+        self.estop_keepalive = EstopKeepAlive(self._estop_endpoint)
+        self.estop_keepalive.allow()  # arm motion (motor power still gated by power_on)
         # Forcibly take the body lease (the tablet usually holds it) and run
         # a keepalive in a background thread until the process exits.
         self.lease_client.take()
@@ -52,6 +66,13 @@ class RobotSession:
         self._nav_thread: threading.Thread | None = None
         self._nav_cancel = threading.Event()
         self.nav_status: dict = {'state': 'idle', 'destination': None}
+
+    def shutdown(self) -> None:
+        """Release the estop endpoint cleanly so the tablet can resume."""
+        try:
+            self.estop_keepalive.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
 
 LOG = logging.getLogger(__name__)
 
@@ -358,6 +379,63 @@ def create_app(cfg: AppConfig, session: RobotSession | None = None) -> FastAPI:
                 raise HTTPException(502, f'power_on failed: {type(e).__name__}: {e}') from e
         return {'ok': True, 'powered_on': s.robot.is_powered_on()}
 
+    @app.get('/api/estop/state')
+    def get_estop_state():
+        s = _require_session()
+        from bosdyn.api import robot_state_pb2
+        try:
+            rs = s.state_client.get_robot_state()
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f'get_robot_state failed: {e}') from e
+        # Find our endpoint and report its level.
+        level_map = {
+            robot_state_pb2.EstopState.STATE_NOT_ESTOPPED: 'allowed',
+            robot_state_pb2.EstopState.STATE_ESTOPPED: 'cut',
+            robot_state_pb2.EstopState.STATE_UNKNOWN: 'unknown',
+        }
+        ours = next((e for e in rs.estop_states if e.name == s.estop_endpoint_name), None)
+        any_other_estopped = any(
+            e.name != s.estop_endpoint_name and
+            e.state != robot_state_pb2.EstopState.STATE_NOT_ESTOPPED
+            for e in rs.estop_states)
+        if ours is None:
+            return {'level': 'unknown', 'endpoint_registered': False,
+                    'any_other_estopped': any_other_estopped}
+        return {
+            'level': level_map.get(ours.state, 'unknown'),
+            'endpoint_registered': True,
+            'any_other_estopped': any_other_estopped,
+        }
+
+    @app.post('/api/estop/allow')
+    def post_estop_allow():
+        s = _require_session()
+        try:
+            s.estop_keepalive.allow()
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f'estop allow failed: {e}') from e
+        return {'ok': True}
+
+    @app.post('/api/estop/settle')
+    def post_estop_settle():
+        s = _require_session()
+        s._nav_cancel.set()
+        try:
+            s.estop_keepalive.settle_then_cut()
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f'estop settle_then_cut failed: {e}') from e
+        return {'ok': True}
+
+    @app.post('/api/estop/cut')
+    def post_estop_cut():
+        s = _require_session()
+        s._nav_cancel.set()
+        try:
+            s.estop_keepalive.stop()
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f'estop cut failed: {e}') from e
+        return {'ok': True}
+
     @app.post('/api/stop')
     def post_stop():
         s = _require_session()
@@ -400,6 +478,7 @@ def main():
     if args.port is not None:
         cfg.server.port = args.port
 
+    import atexit
     session = None
     if args.live:
         # Auto-load .env so BOSDYN_CLIENT_USERNAME/PASSWORD are available
@@ -423,6 +502,7 @@ def main():
             LOG.warning('python-dotenv not installed; .env not auto-loaded.')
         LOG.info('Connecting to Spot at %s ...', args.live)
         session = RobotSession(args.live)
+        atexit.register(session.shutdown)
         LOG.info('Connected. Live mode enabled.')
 
     uvicorn.run(create_app(cfg, session), host=cfg.server.host, port=cfg.server.port)
