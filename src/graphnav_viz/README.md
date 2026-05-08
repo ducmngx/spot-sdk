@@ -2,6 +2,8 @@
 
 A browser-based annotation app for Boston Dynamics **GraphNav** maps.
 
+![2D top-down view](assets/2D_graphnav_noscan.png)
+
 It reads a graph that was already recorded (with `graph_nav_command_line` or
 Autowalk), renders it as an interactive 2D / 3D map, and lets you enrich it
 with metadata that downstream tasks consume:
@@ -115,6 +117,10 @@ See `loader.fiducial_category` for the source of truth.
 | POST | `/api/graphs/{name}/export/doors` | Save annotations and export `<graph>/doors.yaml`. |
 
 ## UI tour
+
+| 2D with scans | 3D with scans |
+|---|---|
+| ![2D with scans](assets/2D_graphnav_withscan.png) | ![3D with scans](assets/3D_graphnav_withscan.png) |
 
 - **Top bar** — graph dropdown, view toggle, "Show scans", "Save annotations",
   "Export doors.yaml".
