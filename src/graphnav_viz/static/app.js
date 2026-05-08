@@ -10,7 +10,16 @@ const state = {
   map2d: null, map3d: null,
   scans: null,        // Float32Array (Nx3) in seed frame, lazy-loaded
   scansVisible: false,
+  schematic: false,   // 2D schematic mode: hide scans/edges/waypoints/fiducials
   loadToken: 0,       // increments per loadGraph; late responses bail if mismatched
+  live: {
+    available: false,   // server has --live session
+    enabled: false,     // user toggled it on
+    pose: null,         // last poll result
+    mode: 'select',     // 'select' | 'drive' — drive sends nav commands on waypoint click
+    uploadedGraph: null,
+    pollTimer: null,
+  },
 };
 
 function setStatus(msg) {
@@ -21,6 +30,17 @@ function setStatus(msg) {
 function api(path, opts) { return fetch(`/api/graphs/${encodeURIComponent(state.graphName)}${path}`, opts); }
 
 async function init() {
+  // Check if the server was started with --live; if so, expose the toggle.
+  try {
+    const live = await fetch('/api/live').then(r => r.json());
+    state.live.available = !!live.enabled;
+    state.live.uploadedGraph = live.uploaded_graph;
+    if (state.live.available) {
+      document.getElementById('live-toggle').hidden = false;
+      document.getElementById('tab-drive').hidden = false;
+    }
+  } catch { /* offline-only; ignore */ }
+
   const graphs = await fetch('/api/graphs').then(r => r.json());
   const sel = document.getElementById('graph-select');
   graphs.forEach(g => {
@@ -93,6 +113,16 @@ document.querySelectorAll('#tabs .tab').forEach(tab => {
 
 // --- Waypoint panel ---
 function selectWaypoint(wp) {
+  if (state.live.enabled && state.live.mode === 'drive') {
+    if (state.live.uploadedGraph !== state.graphName) {
+      setStatus('Upload graph to robot first (Drive tab).');
+      return;
+    }
+    if (!confirm(`Navigate Spot to waypoint ${wp.name || wp.id}?`)) return;
+    api(`/navigate/${encodeURIComponent(wp.id)}`, { method: 'POST' })
+      .then(async r => setStatus(r.ok ? `Navigating to ${wp.id}` : `Nav failed: ${(await r.json()).detail || r.status}`));
+    return;
+  }
   state.selectedWaypointId = wp.id;
   document.querySelector('[data-tab="waypoint"]').click();
   document.getElementById('wp-empty').hidden = true;
@@ -268,14 +298,22 @@ function renderPolygonList(elId, list, key) {
   list.forEach((p, idx) => {
     const card = document.createElement('div');
     card.className = 'card';
+    const colorInput = key === 'rooms'
+      ? `<label>Color <input data-k="color" type="color" value="${p.color || '#48bb78'}"></label>`
+      : '';
     card.innerHTML = `
       <h3>${p.name}</h3>
-      <label>Name <input value="${p.name}"></label>
+      <label>Name <input data-k="name" value="${p.name}"></label>
+      ${colorInput}
       <div class="muted">${p.polygon_seed.length} vertices${p.waypoints ? ` · ${p.waypoints.length} waypoints` : ''}</div>
       <button class="delete">Delete</button>
     `;
-    card.querySelector('input').addEventListener('change', e => {
+    card.querySelector('[data-k="name"]').addEventListener('change', e => {
       list[idx].name = e.target.value;
+      state.map2d?.draw();
+    });
+    card.querySelector('[data-k="color"]')?.addEventListener('input', e => {
+      list[idx].color = e.target.value;
       state.map2d?.draw();
     });
     card.querySelector('.delete').addEventListener('click', () => {
@@ -375,19 +413,132 @@ document.getElementById('scans-toggle').addEventListener('click', async () => {
   state.map2d?.draw();
 });
 
+document.getElementById('schematic-toggle').addEventListener('click', () => {
+  state.schematic = !state.schematic;
+  document.getElementById('schematic-toggle').classList.toggle('active', state.schematic);
+  state.map2d?.draw();
+});
+
 document.getElementById('view-toggle').addEventListener('click', async () => {
   const c2 = document.getElementById('canvas2d'), c3 = document.getElementById('canvas3d');
+  const schBtn = document.getElementById('schematic-toggle');
   if (state.view === '2d') {
     c2.style.display = 'none'; c3.style.display = 'block';
     state.view = '3d';
     document.getElementById('view-toggle').textContent = 'Switch to 2D';
+    schBtn.disabled = true;
     await ensure3D();
   } else {
     c3.style.display = 'none'; c2.style.display = 'block';
     state.view = '2d';
     document.getElementById('view-toggle').textContent = 'Switch to 3D';
+    schBtn.disabled = false;
     state.map2d?.draw();
   }
+});
+
+// --- Live mode ---
+
+function updateDriveStatusUI() {
+  const el = document.getElementById('drive-status');
+  if (!state.live.available) {
+    el.textContent = 'Server was started without --live. No robot connection.';
+    return;
+  }
+  const matches = state.live.uploadedGraph === state.graphName;
+  const parts = [
+    `Live: ${state.live.enabled ? 'on' : 'off'}`,
+    `Uploaded graph: ${state.live.uploadedGraph || '(none)'}`,
+    matches ? 'Loaded graph matches uploaded.' : 'Loaded graph does NOT match uploaded — upload it before navigating.',
+    state.live.pose?.localized ? `Localized at ${state.live.pose.waypoint_id.slice(0, 8)}…` : 'Not localized.',
+    state.live.navStatus ? `Nav: ${state.live.navStatus.state}${state.live.navStatus.error ? ` (${state.live.navStatus.error})` : ''}` : '',
+  ];
+  el.innerHTML = parts.join('<br>');
+}
+
+async function pollPose() {
+  try {
+    const r = await fetch('/api/pose');
+    if (!r.ok) throw new Error(r.statusText);
+    state.live.pose = await r.json();
+  } catch {
+    state.live.pose = null;
+  }
+  try {
+    state.live.navStatus = await fetch('/api/nav_status').then(r => r.json());
+  } catch { /* ignore */ }
+  updateDriveStatusUI();
+  state.map2d?.draw();
+  state.map3d?.setLivePose?.(state.live.pose);
+  // Update header badge
+  const badge = document.getElementById('live-badge');
+  if (!state.live.enabled) { badge.hidden = true; return; }
+  badge.hidden = false;
+  if (!state.live.pose) {
+    badge.textContent = '● disconnected';
+    badge.style.color = '#fc8181';
+  } else if (!state.live.pose.localized) {
+    badge.textContent = '● not localized';
+    badge.style.color = '#a0aec0';
+  } else {
+    badge.textContent = `● live (${state.live.pose.x.toFixed(1)}, ${state.live.pose.y.toFixed(1)})`;
+    badge.style.color = '#48bb78';
+  }
+}
+
+document.getElementById('live-toggle').addEventListener('click', () => {
+  state.live.enabled = !state.live.enabled;
+  document.getElementById('live-toggle').textContent = `Live: ${state.live.enabled ? 'on' : 'off'}`;
+  if (state.live.enabled) {
+    if (state.live.pollTimer) clearInterval(state.live.pollTimer);
+    state.live.pollTimer = setInterval(pollPose, 200);
+    pollPose();
+  } else {
+    if (state.live.pollTimer) clearInterval(state.live.pollTimer);
+    state.live.pollTimer = null;
+    state.live.pose = null;
+    document.getElementById('live-badge').hidden = true;
+    state.map2d?.draw();
+    state.map3d?.setLivePose?.(null);
+  }
+});
+
+document.getElementById('drive-mode').addEventListener('change', e => {
+  state.live.mode = e.target.checked ? 'drive' : 'select';
+  setStatus(state.live.mode === 'drive'
+    ? 'Drive mode: click a waypoint to send Spot there.'
+    : 'Select mode.');
+});
+
+document.getElementById('drive-power-on').addEventListener('click', async () => {
+  setStatus('Powering on motors…');
+  const r = await fetch('/api/power_on', { method: 'POST' });
+  const j = await r.json().catch(() => ({}));
+  setStatus(r.ok ? `Powered on: ${j.powered_on}` : `Power-on failed: ${j.detail || r.status}`);
+});
+
+document.getElementById('drive-upload').addEventListener('click', async () => {
+  if (!state.graphName) return;
+  setStatus('Uploading graph to robot…');
+  const r = await api('/upload', { method: 'POST' });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { setStatus(`Upload failed: ${j.detail || r.status}`); return; }
+  state.live.uploadedGraph = state.graphName;
+  setStatus(`Uploaded ${j.waypoints} waypoints, ${j.edges} edges (${j.waypoint_snapshots_uploaded} snapshots streamed)`);
+  updateDriveStatusUI();
+});
+
+document.getElementById('drive-localize').addEventListener('click', async () => {
+  if (!state.graphName) return;
+  setStatus('Localizing via nearest fiducial…');
+  const r = await api('/localize', { method: 'POST' });
+  const j = await r.json().catch(() => ({}));
+  setStatus(r.ok ? `Localized at ${j.waypoint_id?.slice(0, 8)}…` : `Localize failed: ${j.detail || r.status}`);
+});
+
+document.getElementById('drive-stop').addEventListener('click', async () => {
+  const r = await fetch('/api/stop', { method: 'POST' });
+  setStatus(r.ok ? 'STOP sent' : 'STOP failed');
 });
 
 init().catch(err => {

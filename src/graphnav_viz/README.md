@@ -23,21 +23,49 @@ recorded graph itself is never modified.
 
 ```bash
 pip install fastapi uvicorn pyyaml pydantic numpy bosdyn-client
+# Only needed if you plan to run with --live (auto-loads .env credentials):
+pip install python-dotenv
 ```
 
 (Or pin to your SDK version: `bosdyn-client==5.1.4`.)
+
+### Tools & libraries
+
+| Layer | What we use | Why |
+|---|---|---|
+| Web server | **FastAPI** + **Uvicorn** | minimal-boilerplate REST endpoints, GZip-compressed responses for large point-cloud payloads |
+| Schema validation | **Pydantic** | typed `Annotations` model + automatic JSON (de)serialization for the sidecar |
+| Config | **PyYAML** | optional `graphnav_viz.yaml` for graphs root + server settings |
+| Graph parsing | **bosdyn-client** (`bosdyn.api.graph_nav.map_pb2`, `math_helpers`) | reads recorded graph protos; no VTK / ROS dependency |
+| Numerics | **NumPy** | point-cloud transforms into the seed frame |
+| 2D rendering | plain `<canvas>` + an offscreen pre-rasterized bitmap | scales to ~3 M points without per-frame work |
+| 3D rendering | **three.js** (loaded from a CDN via import-map; no build step) | OrbitControls, Points, InstancedMesh |
+| Live mode (opt-in) | **bosdyn-client** GraphNav / Lease / RobotCommand clients, **python-dotenv** | online robot pose + click-to-navigate |
 
 ## Quick start
 
 From the repo root:
 
 ```bash
+# Offline (annotation only, no robot needed)
 PYTHONPATH=src python -m graphnav_viz.server
 # open http://127.0.0.1:8000
+
+# Live (with a Spot connected — pose overlay + click-to-navigate)
+PYTHONPATH=src python -m graphnav_viz.server --live $SPOT_IP
 ```
 
 The default config looks in `./recorded_graphs/` for any directory containing
 a `graph` proto file (walks up to 2 levels deep).
+
+CLI flags:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--config <path>` | `./graphnav_viz.yaml` if present | YAML config file (see below) |
+| `--graphs <dir>` | from config | parent dir to scan, OR a single graph dir |
+| `--host` / `--port` | `127.0.0.1` / `8000` | uvicorn bind |
+| `--live <SPOT_IP>` | (off) | connect to a Spot and enable Drive features |
 
 ## Config file
 
@@ -106,6 +134,8 @@ See `loader.fiducial_category` for the source of truth.
 
 ## API
 
+### Offline (always available)
+
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/graphs` | List graphs (name + path). |
@@ -115,6 +145,20 @@ See `loader.fiducial_category` for the source of truth.
 | GET | `/api/graphs/{name}/annotations` | Current sidecar contents. |
 | PUT | `/api/graphs/{name}/annotations` | Atomic replace of sidecar (writes to `.tmp` then renames). |
 | POST | `/api/graphs/{name}/export/doors` | Save annotations and export `<graph>/doors.yaml`. |
+
+### Live mode (only with `--live`)
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/live` | `{enabled, hostname, uploaded_graph}` — used by the UI to show/hide the Drive controls. |
+| GET | `/api/pose` | `{x, y, z, yaw, waypoint_id, localized, uploaded_graph}` — `seed_tform_body` from `GraphNavClient.get_localization_state`. |
+| GET | `/api/robot_state` | `{powered_on, estopped, estop_endpoints}`. |
+| GET | `/api/nav_status` | Current `{state, destination, error?}` from the background nav worker. |
+| POST | `/api/power_on` | Powers on the robot's motors. |
+| POST | `/api/stop` | Cancels the active nav and sends a `RobotCommandBuilder.stop_command()`. |
+| POST | `/api/graphs/{name}/upload` | Streams `graph` + missing waypoint/edge snapshots to the robot. |
+| POST | `/api/graphs/{name}/localize` | `set_localization` with `FIDUCIAL_INIT_NEAREST`. |
+| POST | `/api/graphs/{name}/navigate/{waypoint_id}` | Starts (or replaces) a background worker that drives Spot to the waypoint. |
 
 ## UI tour
 
@@ -140,6 +184,63 @@ See `loader.fiducial_category` for the source of truth.
   - *Rooms*: "+ New room" → click vertices on the map → double-click to
     close → name it. Waypoint membership auto-fills via point-in-polygon.
   - *No-go*: same polygon flow.
+  - *Drive* (only with `--live`): power-on, upload graph to robot, localize
+    via nearest fiducial, toggle "click waypoint to navigate", and a big
+    red **STOP** button.
+
+## Live mode
+
+Pass `--live <SPOT_IP>` to start a server that's also wired to a real Spot.
+
+What happens on startup:
+
+1. `.env` is auto-loaded by walking up from the current directory (looks for
+   `BOSDYN_CLIENT_USERNAME` / `BOSDYN_CLIENT_PASSWORD`). You don't need to
+   `source .env` first.
+2. The SDK authenticates and waits for time-sync.
+3. The server **forcibly takes the body lease** (the tablet will lose body
+   control) and runs a `LeaseKeepAlive` for the lifetime of the process. The
+   lease returns to the robot when the server exits.
+
+The frontend exposes a header **Live: off / on** toggle and a **Drive**
+sidebar tab. While Live is on, the UI polls `/api/pose` and `/api/nav_status`
+at 5 Hz and draws Spot as a cyan triangle (2D) / cone (3D), facing along its
+yaw. The marker turns gray if the robot isn't localized to the loaded graph.
+
+### Typical flow
+
+```
+1. Click "Power on"                 (Drive tab)
+2. Click "Upload graph to robot"    (only the missing snapshots are streamed)
+3. Click "Localize (nearest fiducial)"  → /api/pose now returns localized:true
+4. Tick "Click waypoint to navigate"
+5. Click any waypoint on the 2D or 3D map → robot drives there
+6. STOP at any time                 (red button — also cancels the worker)
+```
+
+### Why a background nav worker?
+
+`GraphNavClient.navigate_to(dst, cmd_duration=1.0)` only commands the robot
+for one second. To keep Spot moving until it reaches the goal, the server
+spawns a daemon thread that re-issues the same `command_id` at ~2 Hz and
+polls `navigation_feedback`. The thread exits on `STATUS_REACHED_GOAL`,
+any failure status (`STUCK`, `LOST`, `NO_ROUTE`, `NO_LOCALIZATION`,
+`COMMAND_OVERRIDDEN`), or on `/api/stop`. Status is exposed via
+`/api/nav_status` and shown in the Drive panel.
+
+### Safety notes
+
+- **The server takes the lease forcibly.** If someone else (e.g. the tablet)
+  is driving the robot, they will be preempted. Don't run `--live` in shared
+  operations without coordination.
+- **No e-stop endpoint is registered by this server.** Use the tablet, the
+  hardware kill switch, or run `python python/examples/estop/estop_nogui.py
+  $SPOT_IP` in another terminal. The Drive STOP button only sends a stop
+  command and cancels the nav worker — it does **not** estop.
+- The robot will only respond to `/navigate` if it's powered on and not
+  estopped. Both are surfaced as 409 errors with explicit messages.
+- `/upload` is idempotent — re-uploading the same graph only sends snapshots
+  the robot is missing.
 
 ## Integration
 
@@ -160,7 +261,7 @@ just records annotated YAML.
 
 | File | Purpose |
 |---|---|
-| `server.py` | FastAPI app + endpoints, CLI entry point |
+| `server.py` | FastAPI app + endpoints, CLI entry point, `RobotSession` for live mode |
 | `config.py` | `AppConfig` schema + YAML loader |
 | `loader.py` | Graph proto parsing, anchored layout, fiducial categorization, point-cloud transforms — no VTK |
 | `schema.py` | Pydantic models for `annotations.json` |
@@ -177,8 +278,10 @@ No build step on the frontend; three.js loads from a CDN via import map.
   floor-plan look than the feature cloud underlay.
 - **Multi-user editing** — currently single-user; no locking on
   `annotations.json`.
-- **Robot live overlay** — show the robot's localized pose on the map in
-  real time (would require a SDK connection alongside the offline graph).
+- **Path preview** — render the planned route before issuing `navigate_to`
+  (would need `graph_nav.navigate_route`-style planning).
+- **WebSocket pose stream** — replace the 5 Hz poll with push for smoother
+  marker updates, useful at higher rates.
 
 ## License
 

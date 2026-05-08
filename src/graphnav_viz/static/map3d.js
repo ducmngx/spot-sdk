@@ -64,6 +64,25 @@ export class Map3D {
     this._resize();
   }
 
+  setLivePose(pose) {
+    if (!pose) {
+      if (this.liveMarker) { this.liveMarker.visible = false; }
+      return;
+    }
+    if (!this.liveMarker) {
+      // Cone pointing along +X by default; rotate -90° about Z to point along +X.
+      const geom = new THREE.ConeGeometry(0.18, 0.5, 12);
+      geom.rotateZ(-Math.PI / 2);
+      this.liveMarker = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({ color: 0x00e5ff }));
+      this.scene.add(this.liveMarker);
+    }
+    this.liveMarker.visible = true;
+    this.liveMarker.position.set(pose.x, pose.y, pose.z + 0.1);
+    this.liveMarker.rotation.set(0, 0, pose.yaw);
+    const matches = pose.uploaded_graph === this.state.graphName;
+    this.liveMarker.material.color.set((pose.localized && matches) ? 0x00e5ff : 0xa0aec0);
+  }
+
   setScans(arr) {
     if (this.scansObject) {
       this.scene.remove(this.scansObject);

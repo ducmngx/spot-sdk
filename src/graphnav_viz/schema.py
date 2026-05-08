@@ -40,6 +40,7 @@ class Polygon(BaseModel):
     name: str
     polygon_seed: list[tuple[float, float]]   # [[x, y], ...] in seed frame
     waypoints: list[str] = Field(default_factory=list)
+    color: str | None = None   # "#rrggbb"; None → default green at render time
 
 
 class NoGoZone(BaseModel):

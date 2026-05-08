@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import logging
+import math
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +18,40 @@ from starlette.middleware.gzip import GZipMiddleware
 from . import export, loader
 from .config import AppConfig, load_config
 from .schema import Annotations
+
+
+class RobotSession:
+    """Optional live connection to a Spot for pose + GraphNav commands.
+
+    Created only when the server is launched with --live <SPOT_IP>. All
+    state-changing endpoints serialize on `_lock`.
+    """
+
+    def __init__(self, hostname: str):
+        # Lazy imports: the offline path must work even if bosdyn-client is
+        # somehow broken / not on PYTHONPATH.
+        from bosdyn.client.graph_nav import GraphNavClient
+        from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
+        from bosdyn.client.robot_command import RobotCommandClient
+        from utils import utils
+
+        self.hostname = hostname
+        self.robot = utils.connect(hostname, client_name='graphnav_viz')
+        self.graph_nav = self.robot.ensure_client(GraphNavClient.default_service_name)
+        self.lease_client = self.robot.ensure_client(LeaseClient.default_service_name)
+        self.command_client = self.robot.ensure_client(RobotCommandClient.default_service_name)
+        # Forcibly take the body lease (the tablet usually holds it) and run
+        # a keepalive in a background thread until the process exits.
+        self.lease_client.take()
+        self._lease_keepalive = LeaseKeepAlive(self.lease_client, return_at_exit=True)
+        self.uploaded_graph: str | None = None
+        self._lock = threading.Lock()
+        # Background navigation thread state. navigate_to commands time out
+        # after `cmd_duration` seconds, so we keep re-issuing until the goal
+        # is reached, the route fails, or the user cancels.
+        self._nav_thread: threading.Thread | None = None
+        self._nav_cancel = threading.Event()
+        self.nav_status: dict = {'state': 'idle', 'destination': None}
 
 LOG = logging.getLogger(__name__)
 
@@ -69,7 +105,7 @@ def build_graph_map(cfg: AppConfig) -> dict[str, Path]:
     return graphs
 
 
-def create_app(cfg: AppConfig) -> FastAPI:
+def create_app(cfg: AppConfig, session: RobotSession | None = None) -> FastAPI:
     graphs = build_graph_map(cfg)
     if not graphs:
         raise FileNotFoundError(
@@ -151,6 +187,190 @@ def create_app(cfg: AppConfig) -> FastAPI:
         out = export.write_doors_yaml(ann, path / 'doors.yaml')
         return {'path': str(out), 'count': len(ann.doors)}
 
+    # --- Live mode endpoints (only meaningful when --live was passed) ---
+
+    @app.get('/api/live')
+    def get_live_status():
+        """Whether a live robot session is attached. Frontend uses this to
+        decide whether to show the Live toggle / Drive tab."""
+        return {
+            'enabled': session is not None,
+            'hostname': session.hostname if session else None,
+            'uploaded_graph': session.uploaded_graph if session else None,
+        }
+
+    def _require_session() -> RobotSession:
+        if session is None:
+            raise HTTPException(503, 'Server was not started with --live; no robot connection.')
+        return session
+
+    @app.get('/api/pose')
+    def get_pose():
+        """Current localized pose in seed frame, plus localization status."""
+        s = _require_session()
+        try:
+            state = s.graph_nav.get_localization_state()
+        except Exception as e:  # noqa: BLE001 - surface anything from the robot to the UI
+            raise HTTPException(502, f'get_localization_state failed: {e}') from e
+        loc = state.localization
+        seed_T_body = loc.seed_tform_body
+        # If never localized, position/rotation are all zero — flag that.
+        localized = bool(loc.waypoint_id) and (
+            seed_T_body.rotation.w != 0 or seed_T_body.rotation.x != 0
+            or seed_T_body.rotation.y != 0 or seed_T_body.rotation.z != 0)
+        # Yaw from quaternion (rotation about Z).
+        q = seed_T_body.rotation
+        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y),
+                         1 - 2 * (q.y * q.y + q.z * q.z))
+        return {
+            'localized': localized,
+            'waypoint_id': loc.waypoint_id,
+            'uploaded_graph': s.uploaded_graph,
+            'x': seed_T_body.position.x,
+            'y': seed_T_body.position.y,
+            'z': seed_T_body.position.z,
+            'yaw': yaw,
+        }
+
+    @app.post('/api/graphs/{name}/upload')
+    def post_upload(name: str):
+        s = _require_session()
+        path, _ = _get(name)
+        from utils import utils
+        with s._lock:
+            try:
+                summary = utils.upload_graph_from_disk(s.robot, path)
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(502, f'upload failed: {e}') from e
+            s.uploaded_graph = name
+        return {'ok': True, 'graph': name, **summary}
+
+    @app.post('/api/graphs/{name}/localize')
+    def post_localize(name: str):
+        s = _require_session()
+        if s.uploaded_graph != name:
+            raise HTTPException(409, f'graph {name!r} is not uploaded; upload first.')
+        from bosdyn.api.graph_nav import graph_nav_pb2, nav_pb2
+        with s._lock:
+            try:
+                resp = s.graph_nav.set_localization(
+                    initial_guess_localization=nav_pb2.Localization(),
+                    fiducial_init=graph_nav_pb2.SetLocalizationRequest.FIDUCIAL_INIT_NEAREST,
+                )
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(502, f'set_localization failed: {e}') from e
+        return {'ok': True, 'waypoint_id': resp.waypoint_id}
+
+    def _run_nav_worker(s: RobotSession, destination_id: str) -> None:
+        """Re-issue navigate_to until the robot arrives, fails, or is canceled."""
+        from bosdyn.api.graph_nav import graph_nav_pb2
+        cmd_id = None
+        FAIL_STATES = {
+            graph_nav_pb2.NavigationFeedbackResponse.STATUS_LOST: 'lost',
+            graph_nav_pb2.NavigationFeedbackResponse.STATUS_STUCK: 'stuck',
+            graph_nav_pb2.NavigationFeedbackResponse.STATUS_NO_ROUTE: 'no_route',
+            graph_nav_pb2.NavigationFeedbackResponse.STATUS_NO_LOCALIZATION: 'no_localization',
+            graph_nav_pb2.NavigationFeedbackResponse.STATUS_COMMAND_OVERRIDDEN: 'overridden',
+        }
+        try:
+            while not s._nav_cancel.is_set():
+                try:
+                    cmd_id = s.graph_nav.navigate_to(destination_id, 1.0, command_id=cmd_id)
+                except Exception as e:  # noqa: BLE001
+                    LOG.exception('navigate_to failed mid-route')
+                    s.nav_status = {'state': 'error', 'destination': destination_id,
+                                    'error': f'{type(e).__name__}: {e}'}
+                    return
+                if s._nav_cancel.wait(0.5):
+                    break
+                fb = s.graph_nav.navigation_feedback(cmd_id).status
+                if fb == graph_nav_pb2.NavigationFeedbackResponse.STATUS_REACHED_GOAL:
+                    s.nav_status = {'state': 'reached', 'destination': destination_id}
+                    return
+                if fb in FAIL_STATES:
+                    s.nav_status = {'state': FAIL_STATES[fb], 'destination': destination_id}
+                    return
+            s.nav_status = {'state': 'canceled', 'destination': destination_id}
+        finally:
+            s._nav_thread = None
+
+    @app.post('/api/graphs/{name}/navigate/{waypoint_id}')
+    def post_navigate(name: str, waypoint_id: str):
+        s = _require_session()
+        if s.uploaded_graph != name:
+            raise HTTPException(409, f'graph {name!r} is not uploaded; upload first.')
+        _, gd = _get(name)
+        wp = next((w for w in gd.waypoints
+                   if w['id'] == waypoint_id or w['name'] == waypoint_id), None)
+        if wp is None:
+            raise HTTPException(404, f'waypoint {waypoint_id!r} not in graph')
+        if s.robot.is_estopped():
+            raise HTTPException(409, 'Robot is e-stopped. Release the e-stop before navigating.')
+        if not s.robot.is_powered_on():
+            raise HTTPException(409, 'Robot motors are off. Click "Power on" in the Drive tab first.')
+
+        # Cancel any existing navigation before starting a new one.
+        if s._nav_thread and s._nav_thread.is_alive():
+            s._nav_cancel.set()
+            s._nav_thread.join(timeout=2.0)
+        s._nav_cancel = threading.Event()
+        s.nav_status = {'state': 'navigating', 'destination': wp['id']}
+        t = threading.Thread(target=_run_nav_worker, args=(s, wp['id']),
+                             name=f'nav-{wp["id"][:8]}', daemon=True)
+        s._nav_thread = t
+        t.start()
+        return {'ok': True, 'destination': wp['id']}
+
+    @app.get('/api/nav_status')
+    def get_nav_status():
+        s = _require_session()
+        return s.nav_status
+
+    @app.get('/api/robot_state')
+    def get_robot_state():
+        s = _require_session()
+        from bosdyn.api import robot_state_pb2
+        try:
+            rs = s.robot.ensure_client('robot-state').get_robot_state()
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f'get_robot_state failed: {e}') from e
+        # E-stop: any stop level above NONE (0) is engaged.
+        estops = []
+        for est in rs.estop_states:
+            if est.state != robot_state_pb2.EstopState.STATE_NOT_ESTOPPED:
+                estops.append(est.name)
+        powered_on = (rs.power_state.motor_power_state ==
+                      robot_state_pb2.PowerState.STATE_ON)
+        return {
+            'powered_on': powered_on,
+            'estopped': bool(estops),
+            'estop_endpoints': estops,
+        }
+
+    @app.post('/api/power_on')
+    def post_power_on():
+        s = _require_session()
+        with s._lock:
+            try:
+                s.robot.power_on(timeout_sec=20)
+            except Exception as e:  # noqa: BLE001
+                LOG.exception('power_on failed')
+                raise HTTPException(502, f'power_on failed: {type(e).__name__}: {e}') from e
+        return {'ok': True, 'powered_on': s.robot.is_powered_on()}
+
+    @app.post('/api/stop')
+    def post_stop():
+        s = _require_session()
+        from bosdyn.client.robot_command import RobotCommandBuilder
+        s._nav_cancel.set()
+        with s._lock:
+            try:
+                s.command_client.robot_command(RobotCommandBuilder.stop_command())
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(502, f'stop failed: {e}') from e
+        s.nav_status = {'state': 'canceled', 'destination': s.nav_status.get('destination')}
+        return {'ok': True}
+
     app.mount('/', StaticFiles(directory=str(STATIC_DIR), html=True), name='static')
     return app
 
@@ -166,6 +386,9 @@ def main():
                              'Walks up to 2 levels deep.')
     parser.add_argument('--host', default=None)
     parser.add_argument('--port', type=int, default=None)
+    parser.add_argument('--live', metavar='SPOT_IP', default=None,
+                        help='Connect to a Spot at this IP/hostname for live pose '
+                             'overlay and click-to-navigate.')
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(message)s')
 
@@ -177,7 +400,32 @@ def main():
     if args.port is not None:
         cfg.server.port = args.port
 
-    uvicorn.run(create_app(cfg), host=cfg.server.host, port=cfg.server.port)
+    session = None
+    if args.live:
+        # Auto-load .env so BOSDYN_CLIENT_USERNAME/PASSWORD are available
+        # without `source .env`. find_dotenv walks up from CWD.
+        try:
+            from dotenv import find_dotenv, load_dotenv
+            env_file = find_dotenv(usecwd=True)
+            if env_file:
+                load_dotenv(env_file, override=True)
+                import os as _os
+                u = _os.environ.get('BOSDYN_CLIENT_USERNAME', '')
+                p = _os.environ.get('BOSDYN_CLIENT_PASSWORD', '')
+                LOG.info('Loaded %s (USERNAME=%s, PASSWORD=%s)',
+                         env_file,
+                         'set' if u else 'EMPTY',
+                         'set' if p else 'EMPTY')
+            else:
+                LOG.warning('No .env found above %s — credentials must be in environment.',
+                            Path.cwd())
+        except ImportError:
+            LOG.warning('python-dotenv not installed; .env not auto-loaded.')
+        LOG.info('Connecting to Spot at %s ...', args.live)
+        session = RobotSession(args.live)
+        LOG.info('Connected. Live mode enabled.')
+
+    uvicorn.run(create_app(cfg, session), host=cfg.server.host, port=cfg.server.port)
 
 
 if __name__ == '__main__':

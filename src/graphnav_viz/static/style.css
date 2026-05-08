@@ -5,6 +5,8 @@ header label { font-size: 12px; color: #a0aec0; display: flex; align-items: cent
 header select { background: #1a1d23; color: #e6e6e6; border: 1px solid #333; padding: 0.3rem 0.4rem; border-radius: 3px; font-size: 12px; }
 header button { background: #2c5282; color: white; border: 0; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; }
 header button:hover { background: #2b6cb0; }
+header button.active { background: #f6ad55; color: #1a202c; }
+header button:disabled { background: #4a5568; color: #a0aec0; cursor: default; }
 #graph-info { font-family: ui-monospace, monospace; font-size: 12px; color: #a0aec0; }
 #status { margin-left: auto; font-size: 12px; color: #68d391; }
 
@@ -32,3 +34,9 @@ form button { margin-top: 0.4rem; padding: 0.4rem 0.8rem; background: #2c5282; c
 .card .delete { background: #742a2a; }
 .card .delete:hover { background: #9b2c2c; }
 .card.focus { outline: 2px solid #f6e05e; }
+#live-badge { font-family: ui-monospace, monospace; font-size: 12px; color: #a0aec0; }
+#panel-drive .row { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+#panel-drive button { background: #2c5282; color: white; border: 0; padding: 0.4rem 0.8rem; border-radius: 3px; cursor: pointer; }
+#panel-drive button.delete { background: #742a2a; padding: 0.6rem 1rem; font-weight: bold; width: 100%; }
+#panel-drive button.delete:hover { background: #9b2c2c; }
+#drive-status { margin-bottom: 0.8rem; line-height: 1.5; }

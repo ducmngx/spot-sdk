@@ -20,9 +20,12 @@
     </label>
     <span id="graph-info"></span>
     <button id="view-toggle">Switch to 3D</button>
+    <button id="schematic-toggle">Schematic</button>
     <button id="scans-toggle">Show scans</button>
     <button id="save-btn">Save annotations</button>
     <button id="export-doors-btn">Export doors.yaml</button>
+    <button id="live-toggle" hidden>Live: off</button>
+    <span id="live-badge" hidden></span>
     <span id="status"></span>
   </header>
 
@@ -38,6 +41,7 @@
         <button class="tab" data-tab="doors">Doors</button>
         <button class="tab" data-tab="rooms">Rooms</button>
         <button class="tab" data-tab="nogo">No-go</button>
+        <button class="tab" data-tab="drive" id="tab-drive" hidden>Drive</button>
       </nav>
       <section id="panel-waypoint" class="panel active">
         <h2>Waypoint</h2>
@@ -63,6 +67,20 @@
         <h2>No-go zones</h2>
         <button id="nogo-new">+ New no-go zone</button>
         <div id="nogo-list"></div>
+      </section>
+      <section id="panel-drive" class="panel">
+        <h2>Drive</h2>
+        <div id="drive-status" class="muted">Live mode is off.</div>
+        <div class="row">
+          <button id="drive-power-on">Power on</button>
+          <button id="drive-upload">Upload graph to robot</button>
+          <button id="drive-localize">Localize (nearest fiducial)</button>
+        </div>
+        <label style="margin-top:0.6rem; display:block;">
+          <input type="checkbox" id="drive-mode" />
+          Click waypoint to navigate (off → click selects)
+        </label>
+        <button id="drive-stop" class="delete" style="margin-top:0.8rem;">STOP</button>
       </section>
     </aside>
   </main>

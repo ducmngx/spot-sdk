@@ -11,6 +11,13 @@ function colormap(t) {
   return [r | 0, g | 0, b | 0];
 }
 
+function hexToRgba(hex, alpha) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return `rgba(72,187,120,${alpha})`;            // fallback green
+  const n = parseInt(m[1], 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+}
+
 export const FIDUCIAL_COLORS = {
   localization:      '#f56565',  // red
   dock:              '#4fd1c5',  // teal
@@ -165,6 +172,9 @@ export class Map2D {
     }
 
     if (e.button === 0) {
+      // In schematic mode, waypoints/fiducials are hidden, so skip hit-test
+      // and fall through to pan.
+      if (this.state.schematic) { this.dragLast = { sx, sy }; return; }
       // Hit-test waypoints (radius 8 px) and fiducials (10 px)
       for (const f of this.graph.fiducials) {
         const [fx, fy] = this.w2s(f.x, f.y);
@@ -217,10 +227,12 @@ export class Map2D {
     const w = this.canvas.clientWidth, h = this.canvas.clientHeight;
     ctx.clearRect(0, 0, w, h);
 
+    const schematic = !!this.state.schematic;
+
     // Scans (point-cloud underlay), drawn from a pre-rasterized offscreen
     // bitmap built once in setScans(). Place by mapping the bitmap's
     // world-frame bounds through the current pan/zoom.
-    if (this._scanBitmap && this._scanBounds) {
+    if (!schematic && this._scanBitmap && this._scanBounds) {
       const { minX, maxY, W, H, ppm } = this._scanBounds;
       const [sx0, sy0] = this.w2s(minX, maxY);  // bitmap's top-left in world
       const dw = (W / ppm) * this.scale;
@@ -228,15 +240,16 @@ export class Map2D {
       ctx.drawImage(this._scanBitmap, sx0, sy0, dw, dh);
     }
 
-    // Rooms
-    ctx.fillStyle = 'rgba(72, 187, 120, 0.15)';
-    ctx.strokeStyle = 'rgba(72, 187, 120, 0.6)';
+    // Rooms — per-room color (defaults to green when unset).
     ctx.lineWidth = 1.5;
     for (const r of this.state.annotations.rooms) {
+      const c = r.color || '#48bb78';
+      ctx.fillStyle = hexToRgba(c, 0.18);
+      ctx.strokeStyle = hexToRgba(c, 0.7);
       this._fillPoly(r.polygon_seed);
-      this._labelPoly(r.polygon_seed, r.name, '#48bb78');
+      this._labelPoly(r.polygon_seed, r.name, c);
     }
-    // No-go
+    // No-go (always red — clear danger semantics)
     ctx.fillStyle = 'rgba(229, 62, 62, 0.15)';
     ctx.strokeStyle = 'rgba(229, 62, 62, 0.7)';
     for (const z of this.state.annotations.no_go_zones) {
@@ -244,49 +257,74 @@ export class Map2D {
       this._labelPoly(z.polygon_seed, z.name, '#fc8181');
     }
 
-    // Edges
-    ctx.strokeStyle = 'rgba(160, 174, 192, 0.45)';
-    ctx.lineWidth = 1;
-    const wpById = Object.fromEntries(this.graph.waypoints.map(w => [w.id, w]));
-    ctx.beginPath();
-    for (const e of this.graph.edges) {
-      const a = wpById[e.from], b = wpById[e.to];
-      if (!a || !b) continue;
-      const [ax, ay] = this.w2s(a.x, a.y);
-      const [bx, by] = this.w2s(b.x, b.y);
-      ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
-    }
-    ctx.stroke();
-
-    // Waypoints
-    for (const wp of this.graph.waypoints) {
-      const [x, y] = this.w2s(wp.x, wp.y);
-      const poi = this.state.annotations.waypoint_pois[wp.id];
-      const tagged = poi && (poi.name || poi.tags?.length);
-      ctx.fillStyle = (this.state.selectedWaypointId === wp.id) ? '#f6ad55'
-        : tagged ? '#63b3ed' : '#a0aec0';
+    if (!schematic) {
+      // Edges
+      ctx.strokeStyle = 'rgba(160, 174, 192, 0.45)';
+      ctx.lineWidth = 1;
+      const wpById = Object.fromEntries(this.graph.waypoints.map(w => [w.id, w]));
       ctx.beginPath();
-      ctx.arc(x, y, 5, 0, Math.PI * 2);
-      ctx.fill();
+      for (const e of this.graph.edges) {
+        const a = wpById[e.from], b = wpById[e.to];
+        if (!a || !b) continue;
+        const [ax, ay] = this.w2s(a.x, a.y);
+        const [bx, by] = this.w2s(b.x, b.y);
+        ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+      }
+      ctx.stroke();
+
+      // Waypoints
+      for (const wp of this.graph.waypoints) {
+        const [x, y] = this.w2s(wp.x, wp.y);
+        const poi = this.state.annotations.waypoint_pois[wp.id];
+        const tagged = poi && (poi.name || poi.tags?.length);
+        ctx.fillStyle = (this.state.selectedWaypointId === wp.id) ? '#f6ad55'
+          : tagged ? '#63b3ed' : '#a0aec0';
+        ctx.beginPath();
+        ctx.arc(x, y, 5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Fiducials, colored by category. Doors (those in annotations.doors) get
+      // an outlined ring on top of the localization color.
+      ctx.font = '11px ui-monospace, monospace';
+      const doorTagIds = new Set((this.state.annotations.doors || []).map(d => d.tag_id));
+      for (const f of this.graph.fiducials) {
+        const [x, y] = this.w2s(f.x, f.y);
+        ctx.fillStyle = FIDUCIAL_COLORS[f.category] || FIDUCIAL_COLORS.unknown;
+        ctx.fillRect(x - 6, y - 6, 12, 12);
+        if (doorTagIds.has(f.tag_id)) {
+          ctx.strokeStyle = '#f6e05e';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(x - 9, y - 9, 18, 18);
+        }
+        ctx.fillStyle = '#fff';
+        const tag = `#${f.tag_id}`;
+        const cat = doorTagIds.has(f.tag_id) ? 'door' : (f.category || 'unknown');
+        ctx.fillText(`${tag} ${cat}`, x + 11, y - 4);
+      }
     }
 
-    // Fiducials, colored by category. Doors (those in annotations.doors) get
-    // an outlined ring on top of the localization color.
-    ctx.font = '11px ui-monospace, monospace';
-    const doorTagIds = new Set((this.state.annotations.doors || []).map(d => d.tag_id));
-    for (const f of this.graph.fiducials) {
-      const [x, y] = this.w2s(f.x, f.y);
-      ctx.fillStyle = FIDUCIAL_COLORS[f.category] || FIDUCIAL_COLORS.unknown;
-      ctx.fillRect(x - 6, y - 6, 12, 12);
-      if (doorTagIds.has(f.tag_id)) {
-        ctx.strokeStyle = '#f6e05e';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(x - 9, y - 9, 18, 18);
-      }
-      ctx.fillStyle = '#fff';
-      const tag = `#${f.tag_id}`;
-      const cat = doorTagIds.has(f.tag_id) ? 'door' : (f.category || 'unknown');
-      ctx.fillText(`${tag} ${cat}`, x + 11, y - 4);
+    // Live robot pose (drawn on top of everything else).
+    const pose = this.state.live?.pose;
+    if (this.state.live?.enabled && pose) {
+      const matches = pose.uploaded_graph === this.state.graphName;
+      const fill = (pose.localized && matches) ? '#00e5ff' : '#a0aec0';
+      const [px, py] = this.w2s(pose.x, pose.y);
+      ctx.save();
+      ctx.translate(px, py);
+      // Canvas Y is flipped vs. world Y, so negate yaw for screen rotation.
+      ctx.rotate(-pose.yaw);
+      ctx.fillStyle = fill;
+      ctx.strokeStyle = '#0f1116';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(14, 0);
+      ctx.lineTo(-9, 7);
+      ctx.lineTo(-9, -7);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
     }
 
     // In-progress polygon

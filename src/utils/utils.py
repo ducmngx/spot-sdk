@@ -14,7 +14,7 @@ from typing import Optional
 import numpy as np
 from bosdyn import geometry
 from bosdyn.api import basic_command_pb2, world_object_pb2
-from bosdyn.api.graph_nav import graph_nav_pb2
+from bosdyn.api.graph_nav import graph_nav_pb2, map_pb2
 from bosdyn.client import create_standard_sdk, frame_helpers
 from bosdyn.client.exceptions import ResponseError
 from bosdyn.client.graph_nav import GraphNavClient
@@ -149,6 +149,53 @@ def walk_to_pose(robot, goal: SE2Pose, *, frame_name: str = frame_helpers.VISION
             return
         time.sleep(0.25)
     raise TimeoutError('SE2 trajectory did not reach goal in time.')
+
+
+def upload_graph_from_disk(robot, graph_dir) -> dict:
+    """Upload a recorded GraphNav map (graph + snapshots) from a directory.
+
+    `graph_dir` is the folder containing the `graph` proto and the
+    `waypoint_snapshots/` and `edge_snapshots/` subdirs (the layout produced
+    by the GraphNav recording service). Only snapshots the robot doesn't
+    already have are sent. Returns counts for logging.
+    """
+    from pathlib import Path
+    graph_dir = Path(graph_dir)
+    client: GraphNavClient = robot.ensure_client(GraphNavClient.default_service_name)
+
+    with open(graph_dir / 'graph', 'rb') as f:
+        graph = map_pb2.Graph()
+        graph.ParseFromString(f.read())
+
+    generate_anchoring = not len(graph.anchoring.anchors)
+    response = client.upload_graph(graph=graph, generate_new_anchoring=generate_anchoring)
+
+    wp_uploaded = 0
+    for snapshot_id in response.unknown_waypoint_snapshot_ids:
+        path = graph_dir / 'waypoint_snapshots' / snapshot_id
+        if not path.is_file():
+            continue
+        snap = map_pb2.WaypointSnapshot()
+        snap.ParseFromString(path.read_bytes())
+        client.upload_waypoint_snapshot(snap)
+        wp_uploaded += 1
+
+    edge_uploaded = 0
+    for snapshot_id in response.unknown_edge_snapshot_ids:
+        path = graph_dir / 'edge_snapshots' / snapshot_id
+        if not path.is_file():
+            continue
+        snap = map_pb2.EdgeSnapshot()
+        snap.ParseFromString(path.read_bytes())
+        client.upload_edge_snapshot(snap)
+        edge_uploaded += 1
+
+    return {
+        'waypoints': len(graph.waypoints),
+        'edges': len(graph.edges),
+        'waypoint_snapshots_uploaded': wp_uploaded,
+        'edge_snapshots_uploaded': edge_uploaded,
+    }
 
 
 def navigate_to_waypoint(robot, waypoint: str, *, timeout_sec: float = 120.0) -> None:
