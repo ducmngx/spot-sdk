@@ -32,9 +32,31 @@ export class Map3D {
     this._resize();
 
     this.raycaster = new THREE.Raycaster();
-    this.renderer.domElement.addEventListener('click', e => this._onClick(e));
+    this._onClickH = e => this._onClick(e);
+    this.renderer.domElement.addEventListener('click', this._onClickH);
 
+    this._destroyed = false;
     this._tick();
+  }
+
+  destroy() {
+    if (this._destroyed) return;
+    this._destroyed = true;
+    if (this._raf) cancelAnimationFrame(this._raf);
+    this._resizeObserver?.disconnect();
+    this.renderer.domElement.removeEventListener('click', this._onClickH);
+    this.controls?.dispose();
+    this.scene?.traverse(obj => {
+      obj.geometry?.dispose?.();
+      const mat = obj.material;
+      if (Array.isArray(mat)) mat.forEach(m => m.dispose?.());
+      else mat?.dispose?.();
+    });
+    this.renderer.dispose();
+    if (this.renderer.domElement.parentNode) {
+      this.renderer.domElement.parentNode.removeChild(this.renderer.domElement);
+    }
+    this.graph = null;
   }
 
   refit() {
@@ -142,6 +164,7 @@ export class Map3D {
   }
 
   _tick() {
+    if (this._destroyed) return;
     this._raf = requestAnimationFrame(() => this._tick());
     this.controls.update();
     this.renderer.render(this.scene, this.camera);

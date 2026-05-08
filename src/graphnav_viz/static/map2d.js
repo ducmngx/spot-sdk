@@ -36,13 +36,34 @@ export class Map2D {
     this.polygonMode = null;     // null | { type: 'room' | 'nogo', vertices: [] }
     this.scans = null;           // Float32Array (3N) in seed frame
 
-    canvas.addEventListener('mousedown', e => this._onDown(e));
-    canvas.addEventListener('mousemove', e => this._onMove(e));
-    window.addEventListener('mouseup', () => (this.dragLast = null));
-    canvas.addEventListener('wheel', e => this._onWheel(e), { passive: false });
-    canvas.addEventListener('dblclick', e => this._onDblClick(e));
-    window.addEventListener('resize', () => { this._resize(); this.draw(); });
+    this._handlers = {
+      down: e => this._onDown(e),
+      move: e => this._onMove(e),
+      up: () => (this.dragLast = null),
+      wheel: e => this._onWheel(e),
+      dblclick: e => this._onDblClick(e),
+      resize: () => { this._resize(); this.draw(); },
+    };
+    canvas.addEventListener('mousedown', this._handlers.down);
+    canvas.addEventListener('mousemove', this._handlers.move);
+    window.addEventListener('mouseup', this._handlers.up);
+    canvas.addEventListener('wheel', this._handlers.wheel, { passive: false });
+    canvas.addEventListener('dblclick', this._handlers.dblclick);
+    window.addEventListener('resize', this._handlers.resize);
     this._resize();
+  }
+
+  destroy() {
+    if (!this._handlers) return;
+    this.canvas.removeEventListener('mousedown', this._handlers.down);
+    this.canvas.removeEventListener('mousemove', this._handlers.move);
+    window.removeEventListener('mouseup', this._handlers.up);
+    this.canvas.removeEventListener('wheel', this._handlers.wheel);
+    this.canvas.removeEventListener('dblclick', this._handlers.dblclick);
+    window.removeEventListener('resize', this._handlers.resize);
+    this._handlers = null;
+    this.graph = null;
+    this.scans = null;
   }
 
   _fit() {

@@ -10,6 +10,7 @@ const state = {
   map2d: null, map3d: null,
   scans: null,        // Float32Array (Nx3) in seed frame, lazy-loaded
   scansVisible: false,
+  loadToken: 0,       // increments per loadGraph; late responses bail if mismatched
 };
 
 function setStatus(msg) {
@@ -29,17 +30,28 @@ async function init() {
     sel.appendChild(opt);
   });
   sel.addEventListener('change', () => loadGraph(sel.value));
+  sel.value = graphs[0].name;
   await loadGraph(graphs[0].name);
 }
 
 async function loadGraph(name) {
+  const token = ++state.loadToken;
   state.graphName = name;
   state.selectedWaypointId = null;
-  state.map3d = null;     // force rebuild on next 3D toggle
+  state.map2d?.destroy?.();
+  state.map3d?.destroy?.();
+  state.map2d = null;
+  state.map3d = null;
   state.scans = null; state.scansVisible = false;
   document.getElementById('scans-toggle').textContent = 'Show scans';
-  state.graph = await api('').then(r => r.json());
-  state.annotations = await api('/annotations').then(r => r.json());
+
+  const graph = await api('').then(r => r.json());
+  if (state.loadToken !== token) return;
+  const annotations = await api('/annotations').then(r => r.json());
+  if (state.loadToken !== token) return;
+
+  state.graph = graph;
+  state.annotations = annotations;
   document.getElementById('graph-info').textContent =
     `${state.graph.waypoints.length} waypoints · ${state.graph.fiducials.length} fiducials · anchored=${state.graph.anchored}`;
 
@@ -57,7 +69,8 @@ async function loadGraph(name) {
   c3.innerHTML = '';
 
   // If currently in 3D, rebuild it now
-  if (state.view === '3d') await ensure3D();
+  if (state.view === '3d') await ensure3D(token);
+  if (state.loadToken !== token) return;
 
   // Reset waypoint form
   document.getElementById('wp-empty').hidden = false;
@@ -325,10 +338,11 @@ document.getElementById('export-doors-btn').addEventListener('click', async () =
   setStatus(`Wrote ${j.path} (${j.count} doors)`);
 });
 
-async function ensure3D() {
+async function ensure3D(token) {
   const c3 = document.getElementById('canvas3d');
   if (!state.map3d) {
     const { Map3D } = await import('./map3d.js');
+    if (token !== undefined && state.loadToken !== token) return;
     state.map3d = new Map3D(c3, state.graph, state, {
       onSelectWaypoint: wp => selectWaypoint(wp),
       onSelectFiducial: f => selectFiducial(f),
@@ -343,11 +357,13 @@ async function ensure3D() {
 document.getElementById('scans-toggle').addEventListener('click', async () => {
   const btn = document.getElementById('scans-toggle');
   if (!state.scans) {
+    const token = state.loadToken;
     btn.disabled = true;
     btn.textContent = 'Loading scans…';
     setStatus('Fetching point clouds (this may take a moment)…');
     const r = await api('/all_points');
     const buf = await r.arrayBuffer();
+    if (state.loadToken !== token) { btn.disabled = false; return; }
     state.scans = new Float32Array(buf);
     btn.disabled = false;
     setStatus(`Loaded ${(state.scans.length/3).toLocaleString()} points`);
