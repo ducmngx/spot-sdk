@@ -64,6 +64,8 @@ export class Map2D {
     this._handlers = null;
     this.graph = null;
     this.scans = null;
+    this._scanBitmap = null;
+    this._scanBounds = null;
   }
 
   _fit() {
@@ -92,7 +94,55 @@ export class Map2D {
             -(sy - h / 2) / this.scale + this.center.y];
   }
 
-  setScans(arr) { this.scans = arr; }
+  setScans(arr) {
+    this.scans = arr;
+    if (!arr || !arr.length) {
+      this._scanBitmap = null;
+      this._scanBounds = null;
+      return;
+    }
+    this._buildScanBitmap(arr);
+  }
+
+  // Pre-rasterize the point cloud once into an offscreen canvas covering the
+  // graph's world-frame bounds at a fixed pixel-per-meter resolution. draw()
+  // then just blits this bitmap with the current pan/zoom transform — O(1)
+  // per frame regardless of point count.
+  _buildScanBitmap(arr) {
+    const b = this.graph.bounds;
+    const dx = Math.max(0.1, b.max_x - b.min_x);
+    const dy = Math.max(0.1, b.max_y - b.min_y);
+    // Target resolution: 60 px/m, but cap the largest axis so the bitmap
+    // doesn't blow past ~8k pixels (or ~256 MB ImageData).
+    const maxDim = 8192;
+    const ppm = Math.min(60, maxDim / Math.max(dx, dy));
+    const W = Math.max(1, Math.round(dx * ppm));
+    const H = Math.max(1, Math.round(dy * ppm));
+    const offscreen = (typeof OffscreenCanvas !== 'undefined')
+      ? new OffscreenCanvas(W, H)
+      : Object.assign(document.createElement('canvas'), { width: W, height: H });
+    const octx = offscreen.getContext('2d');
+    const img = octx.createImageData(W, H);
+    const data = img.data;
+    const zmin = b.min_z, zspan = Math.max(1e-3, b.max_z - b.min_z);
+    const minX = b.min_x, maxY = b.max_y;
+    for (let i = 0; i < arr.length; i += 3) {
+      const x = arr[i], y = arr[i + 1], z = arr[i + 2];
+      const px = ((x - minX) * ppm) | 0;
+      const py = ((maxY - y) * ppm) | 0;       // flip Y so +y is up in world
+      if (px < 0 || px >= W || py < 0 || py >= H) continue;
+      const t = (z - zmin) / zspan;
+      const [r, g, bl] = colormap(t);
+      const idx = (py * W + px) * 4;
+      data[idx]     = Math.min(255, data[idx]     + r);
+      data[idx + 1] = Math.min(255, data[idx + 1] + g);
+      data[idx + 2] = Math.min(255, data[idx + 2] + bl);
+      data[idx + 3] = 255;
+    }
+    octx.putImageData(img, 0, 0);
+    this._scanBitmap = offscreen;
+    this._scanBounds = { minX, maxY, W, H, ppm };
+  }
 
   startPolygon(type) {
     this.polygonMode = { type, vertices: [] };
@@ -167,29 +217,15 @@ export class Map2D {
     const w = this.canvas.clientWidth, h = this.canvas.clientHeight;
     ctx.clearRect(0, 0, w, h);
 
-    // Scans (point-cloud underlay), colored by z. Drawn first so everything else
-    // sits on top.
-    if (this.scans && this.scans.length) {
-      const b = this.graph.bounds;
-      const zmin = b.min_z, zspan = Math.max(1e-3, b.max_z - b.min_z);
-      const img = ctx.getImageData(0, 0, Math.max(1, w | 0), Math.max(1, h | 0));
-      const data = img.data;
-      const cx0 = w / 2, cy0 = h / 2;
-      for (let i = 0; i < this.scans.length; i += 3) {
-        const x = this.scans[i], y = this.scans[i + 1], z = this.scans[i + 2];
-        const sx = ((cx0 + (x - this.center.x) * this.scale) | 0);
-        const sy = ((cy0 - (y - this.center.y) * this.scale) | 0);
-        if (sx < 0 || sx >= w || sy < 0 || sy >= h) continue;
-        const t = (z - zmin) / zspan;
-        const [r, g, bl] = colormap(t);
-        const idx = (sy * w + sx) * 4;
-        // Additive write so density shows; alpha stays 255.
-        data[idx]     = Math.min(255, data[idx]     + r);
-        data[idx + 1] = Math.min(255, data[idx + 1] + g);
-        data[idx + 2] = Math.min(255, data[idx + 2] + bl);
-        data[idx + 3] = 255;
-      }
-      ctx.putImageData(img, 0, 0);
+    // Scans (point-cloud underlay), drawn from a pre-rasterized offscreen
+    // bitmap built once in setScans(). Place by mapping the bitmap's
+    // world-frame bounds through the current pan/zoom.
+    if (this._scanBitmap && this._scanBounds) {
+      const { minX, maxY, W, H, ppm } = this._scanBounds;
+      const [sx0, sy0] = this.w2s(minX, maxY);  // bitmap's top-left in world
+      const dw = (W / ppm) * this.scale;
+      const dh = (H / ppm) * this.scale;
+      ctx.drawImage(this._scanBitmap, sx0, sy0, dw, dh);
     }
 
     // Rooms

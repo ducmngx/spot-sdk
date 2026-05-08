@@ -85,8 +85,10 @@ export class Map3D {
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(arr, 3));
     geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    const mat = new THREE.PointsMaterial({ size: 0.04, vertexColors: true,
-                                           sizeAttenuation: true });
+    // Fixed-pixel sizing for the global cloud: avoids massive overdraw at
+    // zoomed-out views on dense scans like fuse_3rd_floor.
+    const mat = new THREE.PointsMaterial({ size: 1.5, vertexColors: true,
+                                           sizeAttenuation: false });
     this.scansObject = new THREE.Points(geom, mat);
     this.scene.add(this.scansObject);
   }

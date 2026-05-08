@@ -7,6 +7,7 @@ BFS layout in an arbitrary frame seeded at the first waypoint.
 
 from __future__ import annotations
 
+import json
 import os
 import struct
 from dataclasses import dataclass
@@ -200,3 +201,34 @@ def load_all_points_in_seed(graph_dir: str | Path) -> np.ndarray:
     if not chunks:
         return np.zeros((0, 3), dtype=np.float32)
     return np.concatenate(chunks, axis=0)
+
+
+def load_all_points_in_seed_cached(graph_dir: str | Path) -> np.ndarray:
+    """Same as `load_all_points_in_seed`, but cache the concatenated result
+    on disk next to the graph (`.all_points_seed.f32` + `.meta.json`),
+    invalidated when the `graph` proto's mtime changes.
+    """
+    graph_dir = Path(graph_dir)
+    cache_path = graph_dir / '.all_points_seed.f32'
+    meta_path = graph_dir / '.all_points_seed.meta.json'
+    graph_file = graph_dir / 'graph'
+    if not graph_file.is_file():
+        return np.zeros((0, 3), dtype=np.float32)
+    graph_mtime = graph_file.stat().st_mtime
+
+    if cache_path.exists() and meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+            if meta.get('graph_mtime') == graph_mtime:
+                arr = np.fromfile(cache_path, dtype=np.float32)
+                if arr.size % 3 == 0:
+                    return arr.reshape(-1, 3)
+        except Exception:
+            pass  # rebuild
+
+    pts = load_all_points_in_seed(graph_dir).astype(np.float32, copy=False)
+    tmp = cache_path.with_suffix('.f32.tmp')
+    pts.tofile(tmp)
+    tmp.replace(cache_path)
+    meta_path.write_text(json.dumps({'graph_mtime': graph_mtime, 'n': int(pts.shape[0])}))
+    return pts

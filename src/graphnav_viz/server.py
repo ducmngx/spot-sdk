@@ -11,6 +11,7 @@ import numpy as np
 import uvicorn
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 from . import export, loader
 from .config import AppConfig, load_config
@@ -84,6 +85,7 @@ def create_app(cfg: AppConfig) -> FastAPI:
         return graphs[name], cache[name]
 
     app = FastAPI(title='GraphNav Annotation App')
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
 
     @app.get('/api/graphs')
     def list_graphs():
@@ -106,7 +108,7 @@ def create_app(cfg: AppConfig) -> FastAPI:
     def get_all_points(name: str):
         path, _ = _get(name)
         if name not in points_cache:
-            points_cache[name] = loader.load_all_points_in_seed(path)
+            points_cache[name] = loader.load_all_points_in_seed_cached(path)
         pts = points_cache[name]
         return Response(content=pts.astype(np.float32).tobytes(),
                         media_type='application/octet-stream',
