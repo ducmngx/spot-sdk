@@ -358,7 +358,7 @@ def create_app(cfg: AppConfig, session: RobotSession | None = None) -> FastAPI:
         # E-stop: any stop level above NONE (0) is engaged.
         estops = []
         for est in rs.estop_states:
-            if est.state != robot_state_pb2.EstopState.STATE_NOT_ESTOPPED:
+            if est.state != robot_state_pb2.EStopState.STATE_NOT_ESTOPPED:
                 estops.append(est.name)
         powered_on = (rs.power_state.motor_power_state ==
                       robot_state_pb2.PowerState.STATE_ON)
@@ -389,14 +389,14 @@ def create_app(cfg: AppConfig, session: RobotSession | None = None) -> FastAPI:
             raise HTTPException(502, f'get_robot_state failed: {e}') from e
         # Find our endpoint and report its level.
         level_map = {
-            robot_state_pb2.EstopState.STATE_NOT_ESTOPPED: 'allowed',
-            robot_state_pb2.EstopState.STATE_ESTOPPED: 'cut',
-            robot_state_pb2.EstopState.STATE_UNKNOWN: 'unknown',
+            robot_state_pb2.EStopState.STATE_NOT_ESTOPPED: 'allowed',
+            robot_state_pb2.EStopState.STATE_ESTOPPED: 'cut',
+            robot_state_pb2.EStopState.STATE_UNKNOWN: 'unknown',
         }
         ours = next((e for e in rs.estop_states if e.name == s.estop_endpoint_name), None)
         any_other_estopped = any(
             e.name != s.estop_endpoint_name and
-            e.state != robot_state_pb2.EstopState.STATE_NOT_ESTOPPED
+            e.state != robot_state_pb2.EStopState.STATE_NOT_ESTOPPED
             for e in rs.estop_states)
         if ours is None:
             return {'level': 'unknown', 'endpoint_registered': False,
