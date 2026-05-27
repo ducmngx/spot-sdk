@@ -1,0 +1,19 @@
+# Runtime deps for the custom packages under src/ (graphnav_viz,
+# spot_arm_door_fiducial, utils). The upstream Boston Dynamics wheels under
+# python/ are NOT included — install those via tools/wheels.py dev-setup if
+# you need to develop against source.
+bosdyn-client==5.1.4
+bosdyn-mission==5.1.4
+bosdyn-choreography-client==5.1.4
+bosdyn-orbit==5.1.4
+
+# graphnav_viz web app
+fastapi
+uvicorn
+pydantic>=2
+pyyaml
+python-dotenv
+numpy
+
+# Used by spot_arm_door_fiducial / utils.get_images_as_cv2 (lazy-imported)
+opencv-python
